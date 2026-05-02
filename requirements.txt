@@ -1,0 +1,16 @@
+anthropic>=0.40.0
+datasets>=2.20.0
+networkx>=3.0,<3.3        # 3.3+ requires Python >=3.10
+sentence-transformers>=3.0.0
+scikit-learn>=1.5.0
+numpy>=1.24.0
+pandas>=2.0.0
+faiss-cpu>=1.7.4
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+nltk>=3.8.0
+torch>=2.0.0
+transformers>=4.35.0
+huggingface-hub>=0.20.0

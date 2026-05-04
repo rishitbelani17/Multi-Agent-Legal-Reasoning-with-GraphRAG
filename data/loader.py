@@ -34,7 +34,7 @@ def _seed_sample(items: list, k: int, seed: int) -> list:
 # ── LEDGAR ────────────────────────────────────────────────────────────────────
 
 def load_ledgar(
-    subset_size: int = config.LEDGAR_SUBSET_SIZE,
+    subset_size: int | None = None,
     seed: int = config.RANDOM_SEED,
     cache_dir: str = config.DATA_CACHE_DIR,
 ) -> list[dict[str, Any]]:
@@ -45,13 +45,16 @@ def load_ledgar(
     Labels are clause category strings (e.g. "Representations", "Indemnification").
     We treat this as a multi-class classification task.
     """
+    if subset_size is None:
+        subset_size = config.LEDGAR_SUBSET_SIZE
+
     try:
         from datasets import load_dataset  # type: ignore
     except ImportError:
         raise ImportError("Run: pip install datasets")
 
     logger.info("Loading LEDGAR dataset …")
-    ds = load_dataset("lex_glue", "ledgar", cache_dir=cache_dir, trust_remote_code=True)
+    ds = load_dataset("lex_glue", "ledgar", cache_dir=cache_dir)
 
     # Merge train + validation splits so we have enough examples
     split = ds["test"] if "test" in ds else ds["train"]
@@ -78,7 +81,7 @@ def load_ledgar(
 # ── CaseHOLDER ────────────────────────────────────────────────────────────────
 
 def load_caseholder(
-    subset_size: int = config.CASEHOLDER_SUBSET_SIZE,
+    subset_size: int | None = None,
     seed: int = config.RANDOM_SEED,
     cache_dir: str = config.DATA_CACHE_DIR,
 ) -> list[dict[str, Any]]:
@@ -89,13 +92,16 @@ def load_caseholder(
     Format: multiple-choice – given a case text, pick the correct holding
     from 5 candidates.  Label is 0-4 (index of correct answer).
     """
+    if subset_size is None:
+        subset_size = config.CASEHOLDER_SUBSET_SIZE
+
     try:
         from datasets import load_dataset  # type: ignore
     except ImportError:
         raise ImportError("Run: pip install datasets")
 
     logger.info("Loading CaseHOLDER (CaseHOLD) dataset …")
-    ds = load_dataset("casehold/casehold", "all", cache_dir=cache_dir, trust_remote_code=True)
+    ds = load_dataset("casehold/casehold", "all", cache_dir=cache_dir)
 
     split = ds["test"] if "test" in ds else ds["train"]
 
@@ -135,7 +141,7 @@ def load_caseholder(
 # ── ECtHR ─────────────────────────────────────────────────────────────────────
 
 def load_ecthr(
-    subset_size: int = config.ECTHR_SUBSET_SIZE,
+    subset_size: int | None = None,
     seed: int = config.RANDOM_SEED,
     cache_dir: str = config.DATA_CACHE_DIR,
 ) -> list[dict[str, Any]]:
@@ -146,13 +152,16 @@ def load_ecthr(
     Label: list of violated articles (multi-label); we binarize to
     violated (1) / not violated (0) based on whether any article is flagged.
     """
+    if subset_size is None:
+        subset_size = config.ECTHR_SUBSET_SIZE
+
     try:
         from datasets import load_dataset  # type: ignore
     except ImportError:
         raise ImportError("Run: pip install datasets")
 
     logger.info("Loading ECtHR dataset …")
-    ds = load_dataset("lex_glue", "ecthr_a", cache_dir=cache_dir, trust_remote_code=True)
+    ds = load_dataset("lex_glue", "ecthr_a", cache_dir=cache_dir)
     split = ds["test"] if "test" in ds else ds["train"]
 
     records: list[dict] = []

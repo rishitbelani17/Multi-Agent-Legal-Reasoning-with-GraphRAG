@@ -1,5 +1,5 @@
 anthropic>=0.40.0
-datasets>=2.20.0
+datasets<2.20.0
 networkx>=3.0,<3.3        # 3.3+ requires Python >=3.10
 sentence-transformers>=3.0.0
 scikit-learn>=1.5.0

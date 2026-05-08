@@ -40,14 +40,29 @@ logger = logging.getLogger(__name__)
 
 class DebateOrchestrator:
     """
-    Sequential debate-style multi-agent pipeline.
+    Multi-round debate-style multi-agent pipeline.
 
     Round structure
     ---------------
-        Retriever → Plaintiff → Defense → Judge
+        Retriever
+        → Round 1: Plaintiff opens   → Defense rebuts
+        → Round 2: Plaintiff counters → Defense counters
+        → ... up to ``n_debate_rounds`` rounds
+        → Judge synthesizes the final answer
 
-    The Judge's output is the final answer. There is no critic-revision loop;
-    the Defense itself plays the adversarial role, and the Judge synthesizes.
+    Each agent sees the full prior conversation in `history`, so Plaintiff's
+    later turns can directly address Defense's rebuttals and vice versa. This
+    makes the system genuinely multi-agent (back-and-forth debate) rather than
+    a single-pass cascade. Set ``n_debate_rounds=1`` to recover the original
+    single-pass behaviour.
+
+    Parameters
+    ----------
+    n_debate_rounds:
+        Number of (Plaintiff, Defense) rebuttal rounds. Default 2.
+    on_message:
+        Optional callback ``fn(stage_label, AgentMessage)`` invoked after each
+        agent turn. Used by the Streamlit UI to stream messages live.
     """
 
     def __init__(
@@ -57,41 +72,70 @@ class DebateOrchestrator:
         defense_agent: DefenseAgent,
         judge_agent: JudgeAgent,
         retrieval_mode: str = "graph",   # "graph" | "vector"  – for logging only
+        n_debate_rounds: int = 2,
+        on_message=None,
     ):
         self.retriever = retriever_agent
         self.plaintiff = plaintiff_agent
         self.defense = defense_agent
         self.judge = judge_agent
         self.retrieval_mode = retrieval_mode
+        self.n_debate_rounds = max(1, int(n_debate_rounds))
+        self.on_message = on_message
+
+    def _emit(self, stage: str, msg: AgentMessage) -> None:
+        if self.on_message is not None:
+            try:
+                self.on_message(stage, msg)
+            except Exception:
+                logger.exception("on_message callback failed for stage=%s", stage)
 
     def run(self, query: str, dataset: str = "caseholder") -> dict[str, Any]:
         t_start = time.perf_counter()
         history: list[AgentMessage] = []
         round_logs: list[dict] = []
+        stages: list[str] = []
 
         # ── Stage 1: Retrieve ────────────────────────────────────────────────
         logger.info("[Debate] Stage 1: RetrieverAgent (%s) …", self.retrieval_mode)
         retriever_msg = self.retriever.run(query=query, history=history)
         history.append(retriever_msg)
         round_logs.append(_log_msg("retrieval", retriever_msg))
+        stages.append("retrieval")
+        self._emit("retrieval", retriever_msg)
 
-        # ── Stage 2: Plaintiff ───────────────────────────────────────────────
-        logger.info("[Debate] Stage 2: PlaintiffAgent …")
-        plaintiff_msg = self.plaintiff.run(query=query, history=history)
-        history.append(plaintiff_msg)
-        round_logs.append(_log_msg("plaintiff", plaintiff_msg))
+        # ── Multi-round debate ───────────────────────────────────────────────
+        for r in range(1, self.n_debate_rounds + 1):
+            p_label = f"plaintiff_round_{r}" if self.n_debate_rounds > 1 else "plaintiff"
+            d_label = f"defense_round_{r}" if self.n_debate_rounds > 1 else "defense"
 
-        # ── Stage 3: Defense ─────────────────────────────────────────────────
-        logger.info("[Debate] Stage 3: DefenseAgent …")
-        defense_msg = self.defense.run(query=query, history=history)
-        history.append(defense_msg)
-        round_logs.append(_log_msg("defense", defense_msg))
+            logger.info("[Debate] Round %d/%d: PlaintiffAgent …", r, self.n_debate_rounds)
+            plaintiff_msg = self.plaintiff.run(
+                query=query, history=history, debate_round=r,
+                total_rounds=self.n_debate_rounds,
+            )
+            history.append(plaintiff_msg)
+            round_logs.append(_log_msg(p_label, plaintiff_msg))
+            stages.append(p_label)
+            self._emit(p_label, plaintiff_msg)
 
-        # ── Stage 4: Judge ───────────────────────────────────────────────────
-        logger.info("[Debate] Stage 4: JudgeAgent …")
+            logger.info("[Debate] Round %d/%d: DefenseAgent …", r, self.n_debate_rounds)
+            defense_msg = self.defense.run(
+                query=query, history=history, debate_round=r,
+                total_rounds=self.n_debate_rounds,
+            )
+            history.append(defense_msg)
+            round_logs.append(_log_msg(d_label, defense_msg))
+            stages.append(d_label)
+            self._emit(d_label, defense_msg)
+
+        # ── Final stage: Judge ───────────────────────────────────────────────
+        logger.info("[Debate] Final stage: JudgeAgent …")
         judge_msg = self.judge.run(query=query, history=history)
         history.append(judge_msg)
         round_logs.append(_log_msg("judge", judge_msg))
+        stages.append("judge")
+        self._emit("judge", judge_msg)
 
         total_latency = time.perf_counter() - t_start
         total_in, total_out = _sum_tokens(history)
@@ -100,7 +144,8 @@ class DebateOrchestrator:
             "pipeline": f"multi_agent_{self.retrieval_mode}_rag",
             "query": query,
             "answer": judge_msg.content,        # Judge produces final ANSWER
-            "stages": ["retrieval", "plaintiff", "defense", "judge"],
+            "stages": stages,
+            "n_debate_rounds": self.n_debate_rounds,
             "round_logs": round_logs,
             "retrieved_chunks": retriever_msg.metadata.get("chunks", []),
             "sub_queries": retriever_msg.metadata.get("sub_queries", []),

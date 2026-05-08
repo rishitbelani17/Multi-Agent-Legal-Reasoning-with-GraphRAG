@@ -190,7 +190,132 @@ def plot_token_usage(
     plt.close(fig)
 
 
-# ── Batch generate all plots ───────────────────────────────��──────────────────
+# ── 6. Confusion matrix per pipeline ──────────────────────────────────────────
+
+def plot_confusion_matrix(
+    pipeline_results: dict[str, list[dict]],
+    output_path: str,
+    title: str = "Confusion Matrices",
+) -> None:
+    """
+    Render a confusion matrix per pipeline as a grid of heatmaps.
+    Uses the predicted_label / true_label fields written by the experiment runner.
+    """
+    from sklearn.metrics import confusion_matrix
+
+    pipelines = [p for p, r in pipeline_results.items() if r]
+    if not pipelines:
+        return
+
+    # Union of labels seen across all pipelines (sorted for deterministic axis order)
+    label_set = set()
+    for results in pipeline_results.values():
+        for r in results:
+            label_set.add(str(r.get("true_label", "")))
+            label_set.add(str(r.get("predicted_label", "")))
+    label_set.discard("")
+    labels = sorted(label_set)
+
+    if not labels:
+        return
+
+    n_cols = min(len(pipelines), 2)
+    n_rows = (len(pipelines) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5.5 * n_cols, 4.5 * n_rows),
+        squeeze=False,
+    )
+
+    for idx, pname in enumerate(pipelines):
+        ax = axes[idx // n_cols][idx % n_cols]
+        results = pipeline_results[pname]
+        y_true = [str(r.get("true_label", "")) for r in results]
+        y_pred = [str(r.get("predicted_label", "")) for r in results]
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=labels,
+            yticklabels=labels,
+            ax=ax,
+            cbar=False,
+            square=True,
+        )
+        ax.set_title(PIPELINE_LABELS.get(pname, pname))
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        for tick in ax.get_xticklabels():
+            tick.set_rotation(30)
+            tick.set_ha("right")
+
+    # Hide any unused subplots in the grid
+    for idx in range(len(pipelines), n_rows * n_cols):
+        axes[idx // n_cols][idx % n_cols].axis("off")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    ensure_dir(os.path.dirname(output_path) or ".")
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ── 7. Significance comparison plot ───────────────────────────────────────────
+
+def plot_significance_comparison(
+    sig_results: dict[str, dict],
+    output_path: str,
+    baseline: str = "vector_rag",
+    title: str = "Accuracy improvement over baseline (with 95% CI)",
+) -> None:
+    """
+    Bar chart of (pipeline_acc - baseline_acc) with bootstrap 95% CI error bars.
+    Uses the output of evaluation.significance.compare_pipelines.
+    """
+    pipelines = [p for p in sig_results if p != baseline]
+    if not pipelines:
+        return
+
+    deltas = [sig_results[p]["delta_accuracy"] for p in pipelines]
+    ci_lo = [sig_results[p]["ci_low"] for p in pipelines]
+    ci_hi = [sig_results[p]["ci_high"] for p in pipelines]
+    p_vals = [sig_results[p]["p_value"] for p in pipelines]
+
+    err_low = [d - lo for d, lo in zip(deltas, ci_lo)]
+    err_high = [hi - d for hi, d in zip(ci_hi, deltas)]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(
+        pipelines,
+        deltas,
+        yerr=[err_low, err_high],
+        capsize=6,
+        color=[PIPELINE_COLORS.get(p, "gray") for p in pipelines],
+    )
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_ylabel(f"Δ Accuracy vs {baseline}")
+    ax.set_title(title)
+    ax.set_xticklabels([PIPELINE_LABELS.get(p, p) for p in pipelines], rotation=15, ha="right")
+
+    for bar, p in zip(bars, p_vals):
+        marker = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "n.s."
+        ax.annotate(
+            marker,
+            xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            fontsize=10,
+        )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+# ── Batch generate all plots ──────────────────────────────────────────────────
 
 def generate_all_plots(
     metrics: dict[str, dict],
@@ -225,6 +350,15 @@ def generate_all_plots(
 
         plot_token_usage(metrics, _path("token_usage"))
         saved.append(_path("token_usage"))
+
+        plot_confusion_matrix(pipeline_results, _path("confusion_matrix"))
+        saved.append(_path("confusion_matrix"))
+
+    # Significance plot if the runner attached results to metrics
+    sig_data = {p: m["significance"] for p, m in metrics.items() if "significance" in m}
+    if sig_data:
+        plot_significance_comparison(sig_data, _path("significance"))
+        saved.append(_path("significance"))
 
     return saved
 

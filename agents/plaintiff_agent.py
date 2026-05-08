@@ -67,23 +67,53 @@ class PlaintiffAgent(BaseAgent):
         query: str,
         context: str = "",
         history: list[AgentMessage] | None = None,
+        debate_round: int = 1,
+        total_rounds: int = 1,
         **kwargs: Any,
     ) -> AgentMessage:
         history = history or []
 
         retriever_summary = ""
         raw_context = ""
+        prior_plaintiff: list[str] = []
+        prior_defense: list[str] = []
         for msg in history:
-            if msg.sender == "RetrieverAgent":
+            if msg.sender == "RetrieverAgent" and not retriever_summary:
                 retriever_summary = msg.content
                 raw_context = msg.metadata.get("raw_context", "")
-                break
+            elif msg.sender == "PlaintiffAgent":
+                prior_plaintiff.append(msg.content)
+            elif msg.sender == "DefenseAgent":
+                prior_defense.append(msg.content)
 
-        user_prompt = (
-            f"## Legal Query\n{query}\n\n"
-            + (f"## Evidence Summary (RetrieverAgent)\n{retriever_summary}\n\n" if retriever_summary else "")
-            + (f"## Retrieved Passages\n{raw_context}\n\n" if raw_context else "")
-            + "Construct your affirmative legal argument."
-        )
+        is_rebuttal = debate_round > 1 and len(prior_defense) > 0
 
+        prompt_parts = [f"## Legal Query\n{query}\n"]
+        if retriever_summary:
+            prompt_parts.append(f"## Evidence Summary (RetrieverAgent)\n{retriever_summary}\n")
+        if raw_context:
+            prompt_parts.append(f"## Retrieved Passages\n{raw_context}\n")
+
+        if is_rebuttal:
+            # Show the most recent Defense rebuttal so Plaintiff can directly counter it
+            last_defense = prior_defense[-1]
+            prompt_parts.append(f"## Defense's Most Recent Argument\n{last_defense}\n")
+            if prior_plaintiff:
+                prompt_parts.append(
+                    f"## Your Previous Argument (do not repeat verbatim)\n{prior_plaintiff[-1]}\n"
+                )
+            prompt_parts.append(
+                f"### Round {debate_round} of {total_rounds} — REBUTTAL\n"
+                "The Defense has challenged your position. Refine your affirmative case: "
+                "directly address each weakness Defense raised, strengthen your strongest "
+                "evidence, and concede any point that is genuinely correct. "
+                "If your position has not changed, restate POSITION but provide a *new* ARGUMENT."
+            )
+        else:
+            prompt_parts.append(
+                f"### Round {debate_round} of {total_rounds} — OPENING\n"
+                "Construct your affirmative legal argument."
+            )
+
+        user_prompt = "\n".join(prompt_parts)
         return self._call_llm(user_prompt)

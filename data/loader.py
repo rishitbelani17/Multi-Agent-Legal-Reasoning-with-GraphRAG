@@ -111,21 +111,32 @@ def load_caseholder(
         choices = [
             row.get(f"holding_{i}", "") for i in range(5)
         ]
+        citing_prompt = row.get("citing_prompt", "")
+        # `text` is the FULL question shown to the LLM (citing prompt + choices)
+        # so the LLM can pick from the 5 candidates.
         text = (
-            row.get("citing_prompt", "")
+            citing_prompt
             + "\n\nChoices:\n"
             + "\n".join(f"({i}) {c}" for i, c in enumerate(choices))
         )
+        # `corpus_text` is what the retrieval corpus is built from. It MUST NOT
+        # contain the candidate holdings — that would leak the answer label
+        # into the retrieval index, which we observed empirically: in the
+        # 2026-05-06 run the Plaintiff routinely cited "Passage 4" containing
+        # the literal text of the correct candidate. The CaseHOLD citing
+        # prompt itself is masked at the holding ("<HOLDING>") so it is safe
+        # to put into the corpus by itself.
         label = int(row.get("label", 0))
         records.append(
             {
                 "id": f"caseholder_{len(records)}",
                 "text": text,
+                "corpus_text": citing_prompt,
                 "label": label,
                 "label_str": f"holding_{label}",
                 "metadata": {
                     "choices": choices,
-                    "citing_prompt": row.get("citing_prompt", ""),
+                    "citing_prompt": citing_prompt,
                 },
                 "dataset": "caseholder",
             }

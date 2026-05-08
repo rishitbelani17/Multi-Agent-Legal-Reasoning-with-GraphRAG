@@ -69,26 +69,54 @@ class DefenseAgent(BaseAgent):
         query: str,
         context: str = "",
         history: list[AgentMessage] | None = None,
+        debate_round: int = 1,
+        total_rounds: int = 1,
         **kwargs: Any,
     ) -> AgentMessage:
         history = history or []
 
         retriever_summary = ""
         raw_context = ""
-        plaintiff_argument = ""
+        prior_plaintiff: list[str] = []
+        prior_defense: list[str] = []
         for msg in history:
-            if msg.sender == "RetrieverAgent":
+            if msg.sender == "RetrieverAgent" and not retriever_summary:
                 retriever_summary = msg.content
                 raw_context = msg.metadata.get("raw_context", "")
-            if msg.sender == "PlaintiffAgent":
-                plaintiff_argument = msg.content
+            elif msg.sender == "PlaintiffAgent":
+                prior_plaintiff.append(msg.content)
+            elif msg.sender == "DefenseAgent":
+                prior_defense.append(msg.content)
 
-        user_prompt = (
-            f"## Legal Query\n{query}\n\n"
-            + (f"## Evidence Summary (RetrieverAgent)\n{retriever_summary}\n\n" if retriever_summary else "")
-            + (f"## Retrieved Passages\n{raw_context}\n\n" if raw_context else "")
-            + f"## Plaintiff's Argument\n{plaintiff_argument}\n\n"
-            "Critique the Plaintiff's argument and present the strongest opposing case."
+        # The most recent Plaintiff turn is what Defense rebuts (always present
+        # because the orchestrator always calls Plaintiff before Defense in a round).
+        plaintiff_argument = prior_plaintiff[-1] if prior_plaintiff else ""
+        is_counter_rebuttal = debate_round > 1 and len(prior_defense) > 0
+
+        prompt_parts = [f"## Legal Query\n{query}\n"]
+        if retriever_summary:
+            prompt_parts.append(f"## Evidence Summary (RetrieverAgent)\n{retriever_summary}\n")
+        if raw_context:
+            prompt_parts.append(f"## Retrieved Passages\n{raw_context}\n")
+        prompt_parts.append(
+            f"## Plaintiff's Most Recent Argument (Round {debate_round})\n{plaintiff_argument}\n"
         )
+        if is_counter_rebuttal:
+            prompt_parts.append(
+                f"## Your Previous Argument (do not repeat verbatim)\n{prior_defense[-1]}\n"
+            )
+            prompt_parts.append(
+                f"### Round {debate_round} of {total_rounds} — COUNTER-REBUTTAL\n"
+                "Plaintiff has refined their position to address your earlier critique. "
+                "Identify what they conceded, what they failed to address, and any new "
+                "weaknesses introduced by their refinement. Update your counter-position "
+                "or strengthen your existing one with new evidence."
+            )
+        else:
+            prompt_parts.append(
+                f"### Round {debate_round} of {total_rounds} — OPENING REBUTTAL\n"
+                "Critique the Plaintiff's argument and present the strongest opposing case."
+            )
 
+        user_prompt = "\n".join(prompt_parts)
         return self._call_llm(user_prompt)

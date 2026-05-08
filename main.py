@@ -94,6 +94,26 @@ def parse_args() -> argparse.Namespace:
         help="Skip generating plots",
     )
     p.add_argument(
+        "--n-runs",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent runs of each pipeline on the same examples. "
+            "Required for the inter-run consistency metric (proposal §2.4). "
+            "Cost scales linearly with n_runs. Default: 1 (no consistency)."
+        ),
+    )
+    p.add_argument(
+        "--n-debate-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Number of (Plaintiff↔Defense) rebuttal rounds in multi-agent "
+            "pipelines. Overrides config.N_DEBATE_ROUNDS for this run. "
+            "1 = single-pass; 2+ = true back-and-forth debate."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default=config.LOG_LEVEL,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -114,11 +134,16 @@ def run_dataset(
         elif dataset_name == "ecthr":
             config.ECTHR_SUBSET_SIZE = args.subset
 
+    # Apply --n-debate-rounds override globally for this run
+    if args.n_debate_rounds is not None:
+        config.N_DEBATE_ROUNDS = args.n_debate_rounds
+
     runner = ExperimentRunner(
         dataset_name=dataset_name,
         pipelines=args.pipelines,
         results_dir=args.results_dir,
         model=args.model,
+        n_runs=args.n_runs,
     )
     result = runner.run()
 

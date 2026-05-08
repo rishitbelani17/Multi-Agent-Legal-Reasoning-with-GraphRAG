@@ -51,8 +51,25 @@ class Preprocessor:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def process(self, doc: dict) -> list[Chunk]:
-        """Return overlapping text chunks for a single document dict."""
-        text = self._clean(doc["text"])
+        """
+        Return overlapping text chunks for a single document dict.
+
+        Source-text resolution:
+            ``doc["corpus_text"]`` if present, otherwise ``doc["text"]``.
+
+        The split exists to prevent answer-label leakage on multiple-choice
+        datasets (CaseHOLD): the LLM-facing query (``text``) includes the 5
+        candidate holdings — but the retrieval corpus must NOT, otherwise
+        the retriever finds chunks containing the literal answer text and
+        the agents can win by string-matching. ``corpus_text`` lets a
+        loader supply a clean retrieval-only view that excludes the
+        candidate set.
+
+        Loaders for non-MCQ datasets (LEDGAR, ECtHR) can omit
+        ``corpus_text`` entirely and the chunker falls back to ``text``.
+        """
+        source = doc.get("corpus_text") or doc["text"]
+        text = self._clean(source)
         raw_chunks = self._sliding_window(text)
         chunks: list[Chunk] = []
         for i, (start, end) in enumerate(raw_chunks):

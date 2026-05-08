@@ -55,6 +55,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         extra_messages: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """
         Call the Anthropic Messages API.
@@ -64,6 +65,11 @@ class LLMClient:
         system_prompt:   System message content.
         user_prompt:     User message content.
         extra_messages:  Optional additional messages for multi-turn context.
+        max_tokens:      Optional per-call override of self.max_tokens. Used by
+                         agents that need a longer output budget (e.g. the
+                         JudgeAgent, which produces a four-line header followed
+                         by extended reasoning and was being truncated at the
+                         default 1024 cap).
 
         Returns
         -------
@@ -74,11 +80,13 @@ class LLMClient:
             messages.extend(extra_messages)
         messages.append({"role": "user", "content": user_prompt})
 
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
         for attempt in range(self.max_retries):
             try:
                 response = self._client.messages.create(
                     model=self.model,
-                    max_tokens=self.max_tokens,
+                    max_tokens=effective_max_tokens,
                     temperature=self.temperature,
                     system=system_prompt,
                     messages=messages,

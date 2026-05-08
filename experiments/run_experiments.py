@@ -32,7 +32,9 @@ from data.loader import DataLoader
 from data.preprocessor import Preprocessor
 from evaluation.cost_tracker import CostTracker
 from evaluation.error_taxonomy import ErrorTaxonomy
-from evaluation.metrics import aggregate_results, parse_answer
+from evaluation.metrics import aggregate_results, consistency_score, parse_answer
+from evaluation.retrieval_metrics import aggregate_retrieval_metrics, chunks_per_doc
+from evaluation.significance import compare_pipelines
 from graph.builder import GraphBuilder
 from graph.retriever import GraphRetriever
 from pipelines.baseline_rag import run_baseline_rag
@@ -76,14 +78,21 @@ class ExperimentRunner:
         results_dir: str = config.RESULTS_DIR,
         graph_cache: str | None = None,
         model: str = config.LLM_MODEL,
+        n_runs: int = 1,
     ):
         self.dataset_name = dataset_name
         self.pipelines = pipelines or self.ALL_PIPELINES
         self.results_dir = results_dir
+        # Cache filename includes CORPUS_VERSION so any older graph built
+        # from the leaky pre-v2 corpus is bypassed automatically.
         self.graph_cache = graph_cache or os.path.join(
-            config.GRAPH_CACHE_DIR, f"{dataset_name}_graph.pkl"
+            config.GRAPH_CACHE_DIR,
+            f"{dataset_name}_graph_{config.CORPUS_VERSION}.pkl",
         )
         self.model = model
+        # Number of independent runs of each pipeline on the same examples.
+        # Needed for the inter-run consistency metric (proposal §2.4).
+        self.n_runs = max(1, int(n_runs))
 
         ensure_dir(results_dir)
         ensure_dir(config.GRAPH_CACHE_DIR)
@@ -134,27 +143,55 @@ class ExperimentRunner:
 
         graph_retriever = GraphRetriever(graph=graph, embedder=embedder)
 
-        # ── Run each pipeline ─────────────────────────────────────────────────
+        # ── Run each pipeline (possibly N times for consistency) ──────────────
+        # pipeline_results[name] = run-1 results (used for primary metrics)
+        # pipeline_runs[name]    = [run-1 preds, run-2 preds, ...] (consistency)
         pipeline_results: dict[str, list[dict]] = {}
+        pipeline_runs: dict[str, list[list[str]]] = {}
         cost_tracker = CostTracker(model=self.model)
         error_tax = ErrorTaxonomy()
 
+        # Per-pipeline N_runs override. Baselines are deterministic at
+        # temperature 0 with no debate, so running them more than once burns
+        # API quota for no insight. Multi-agent pipelines have stochasticity
+        # from the back-and-forth and benefit from a consistency estimate.
+        # Override globally with self.n_runs, or per-pipeline via this map.
+        per_pipeline_runs = {
+            "single_llm": 1,
+            "vector_rag": 1,
+            "graph_rag": 1,
+            "single_agent": 1,
+            "multi_agent_vector": self.n_runs,
+            "multi_agent": self.n_runs,
+        }
+
         for pipeline_name in self.pipelines:
             logger.info("-" * 40)
-            logger.info("Running pipeline: %s", pipeline_name)
-            results = self._run_pipeline(
-                pipeline_name=pipeline_name,
-                docs=docs,
-                label_names=label_names,
-                vector_index=vector_index,
-                graph_retriever=graph_retriever,
-                llm=llm,
-                cost_tracker=cost_tracker,
-                error_tax=error_tax,
-            )
-            pipeline_results[pipeline_name] = results
+            n_runs_eff = per_pipeline_runs.get(pipeline_name, self.n_runs)
+            logger.info("Running pipeline: %s (n_runs=%d)", pipeline_name, n_runs_eff)
+            run_predictions: list[list[str]] = []
+            primary_results: list[dict] = []
+            for run_idx in range(n_runs_eff):
+                if n_runs_eff > 1:
+                    logger.info("  Run %d/%d", run_idx + 1, n_runs_eff)
+                results = self._run_pipeline(
+                    pipeline_name=pipeline_name,
+                    docs=docs,
+                    label_names=label_names,
+                    vector_index=vector_index,
+                    graph_retriever=graph_retriever,
+                    llm=llm,
+                    cost_tracker=cost_tracker,
+                    error_tax=error_tax,
+                )
+                run_predictions.append([r.get("predicted_label", "") for r in results])
+                if run_idx == 0:
+                    primary_results = results
+            pipeline_results[pipeline_name] = primary_results
+            pipeline_runs[pipeline_name] = run_predictions
             logger.info(
-                "Pipeline %s complete: %d examples processed.", pipeline_name, len(results)
+                "Pipeline %s complete: %d examples × %d runs.",
+                pipeline_name, len(primary_results), n_runs_eff,
             )
 
         # ── Aggregate metrics ─────────────────────────────────────────────────
@@ -167,6 +204,42 @@ class ExperimentRunner:
         for pname in metrics_summary:
             if pname in cost_summary:
                 metrics_summary[pname]["cost"] = cost_summary[pname]
+
+        # ── Inter-run consistency (proposal §2.4) ─────────────────────────────
+        if self.n_runs > 1:
+            for pname, runs in pipeline_runs.items():
+                metrics_summary[pname]["consistency"] = consistency_score(runs)
+
+        # ── Retrieval quality metrics ─────────────────────────────────────────
+        chunks_by_doc_map = chunks_per_doc(chunks)
+        retrieval_summary = aggregate_retrieval_metrics(
+            pipeline_results, chunks_by_doc=chunks_by_doc_map
+        )
+        for pname, rmetrics in retrieval_summary.items():
+            if pname in metrics_summary:
+                metrics_summary[pname]["retrieval"] = rmetrics
+
+        # ── Statistical significance vs the cheapest RAG baseline ─────────────
+        # We pick vector_rag as baseline because it's the simplest pipeline that
+        # still uses retrieval, so the deltas attribute changes to "agents +
+        # graph" rather than "retrieval at all".
+        baseline_name = "vector_rag" if "vector_rag" in pipeline_results else (
+            "single_llm" if "single_llm" in pipeline_results else None
+        )
+        if baseline_name and len(pipeline_results) > 1:
+            sig = compare_pipelines(pipeline_results, baseline=baseline_name)
+            for pname, s in sig.items():
+                if pname in metrics_summary:
+                    metrics_summary[pname]["significance"] = {
+                        "baseline": baseline_name,
+                        "delta_accuracy": s["delta_accuracy"],
+                        "ci_low": s["ci_low"],
+                        "ci_high": s["ci_high"],
+                        "p_value": s["p_value"],
+                        "mcnemar_p": s["mcnemar_p"],
+                        "mcnemar_b": s["mcnemar_b"],
+                        "mcnemar_c": s["mcnemar_c"],
+                    }
 
         # ── Error taxonomy summary ────────────────────────────────────────────
         error_summary: dict[str, dict] = {}
@@ -182,6 +255,8 @@ class ExperimentRunner:
         save_json(metrics_summary, f"{out_prefix}_metrics.json")
         save_json(error_summary, f"{out_prefix}_errors.json")
         save_json(cost_summary, f"{out_prefix}_cost.json")
+        if self.n_runs > 1:
+            save_json(pipeline_runs, f"{out_prefix}_all_runs.json")
 
         self._print_summary_table(metrics_summary, error_summary)
 
@@ -255,8 +330,17 @@ class ExperimentRunner:
                 raw, true_label, label_names
             )
 
-            # Record cost
-            cost_tracker.record_from_result(raw, query_id=doc["id"])
+            # Record cost. Pass pipeline_name explicitly so the cost-summary
+            # key matches the metrics-summary key (the orchestrator's internal
+            # pipeline label like 'multi_agent_vector_rag' would otherwise
+            # mismatch and show $0.00).
+            cost_tracker.record(
+                pipeline=pipeline_name,
+                query_id=doc["id"],
+                input_tokens=raw.get("input_tokens", 0),
+                output_tokens=raw.get("output_tokens", 0),
+                latency_s=raw.get("latency_s", 0.0),
+            )
 
             results.append(raw)
 
@@ -275,17 +359,35 @@ class ExperimentRunner:
         metrics: dict[str, Any],
         errors: dict[str, Any],
     ) -> None:
-        header = f"\n{'Pipeline':<25} {'Acc':>6} {'F1-Mac':>8} {'F1-Wt':>8} {'AvgLat':>8} {'TotCost':>9}"
+        header = (
+            f"\n{'Pipeline':<22} {'Acc':>6} {'F1-Mac':>7} {'F1-Wt':>7} "
+            f"{'RetP':>6} {'RetR':>6} {'MRR':>6} {'Cons':>6} "
+            f"{'ΔAcc':>7} {'p':>6} {'Lat':>6} {'Cost':>8}"
+        )
         logger.info(header)
         logger.info("-" * len(header))
         for pname, m in metrics.items():
             cost_usd = m.get("cost", {}).get("total_cost_usd", 0.0)
+            ret = m.get("retrieval", {})
+            cons = m.get("consistency", {})
+            sig = m.get("significance", {})
             logger.info(
-                "%-25s %6.3f %8.3f %8.3f %8.2fs %9.4f$",
+                "%-22s %6.3f %7.3f %7.3f %6.3f %6.3f %6.3f %6.3f %+7.3f %6.3f %5.1fs %8.4f$",
                 pname,
                 m.get("accuracy", 0),
                 m.get("f1_macro", 0),
                 m.get("f1_weighted", 0),
+                ret.get("mean_precision", 0.0),
+                ret.get("mean_recall", 0.0),
+                ret.get("mean_mrr", 0.0),
+                cons.get("mean_pairwise", 0.0) if cons else 0.0,
+                sig.get("delta_accuracy", 0.0),
+                sig.get("p_value", 1.0),
                 m.get("avg_latency_s", 0),
                 cost_usd,
             )
+        logger.info(
+            "Legend: RetP/RetR/MRR = retrieval precision/recall/MRR vs gold doc; "
+            "Cons = inter-run pairwise agreement (0 if n_runs=1); "
+            "ΔAcc + p = paired-bootstrap accuracy delta vs vector_rag baseline."
+        )

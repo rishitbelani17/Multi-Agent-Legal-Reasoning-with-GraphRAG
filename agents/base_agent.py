@@ -58,9 +58,11 @@ class BaseAgent:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _call_llm(self, user_content: str) -> AgentMessage:
+    def _call_llm(self, user_content: str, max_tokens: int | None = None) -> AgentMessage:
         t0 = time.perf_counter()
-        response = self.llm.call(self.system_prompt, user_content)
+        response = self.llm.call(
+            self.system_prompt, user_content, max_tokens=max_tokens
+        )
         elapsed = time.perf_counter() - t0
         return AgentMessage(
             sender=self.name,
